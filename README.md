@@ -26,6 +26,7 @@ Copy the .jar file from the ../target directory into the ../web-container/webapp
 <b>Usage</b>
 <br/>
 The node should be added to an authentication tree and assumes username is available in shared state, e.g., place the registration node after a Username Collector node. If required, the registration node can be followed with a push sender and push verification node as confirmation.
+Note: this node does not support emergency codes or user skippable MFA - you must ensure "Remove Skip Option" is enabled on any Push Sender nodes.
 <br/>
 <br/>
 <b>To Build</b>
