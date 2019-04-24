@@ -31,6 +31,7 @@ import org.forgerock.openam.annotations.sm.Attribute;
 import org.forgerock.openam.auth.node.api.*;
 import org.forgerock.openam.authentication.callbacks.PollingWaitCallback;
 import org.forgerock.openam.core.CoreWrapper;
+import org.forgerock.openam.services.baseurl.BaseURLProvider;
 import org.forgerock.openam.services.baseurl.BaseURLProviderFactory;
 import org.forgerock.openam.services.push.*;
 import org.forgerock.openam.services.push.dispatch.handlers.ClusterMessageHandler;
@@ -38,6 +39,7 @@ import org.forgerock.openam.session.SessionCookies;
 import org.forgerock.util.encode.Base64;
 
 import javax.inject.Inject;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import static org.forgerock.openam.auth.node.api.Action.send;
 import static org.forgerock.openam.auth.node.api.SharedStateConstants.USERNAME;
@@ -147,22 +149,28 @@ public class PushRegNode implements Node {
     }
 
 
-    private Callback createQRCodeCallback(PushDeviceSettings deviceProfile, AMIdentity id, String messageId, String challenge) {
-        QRCallbackBuilder builder = new QRCallbackBuilder().withUriScheme("pushauth")
-                .withUriHost("push")
-                .withUriPath("forgerock")
-                .withUriPort(id.getName())
-                .withCallbackIndex(0)
-                .addUriQueryComponent(LOADBALANCER_DATA_QR_CODE_KEY,
-                        Base64url.encode(sessionCookies.getLBCookie().getBytes()))
-                .addUriQueryComponent(ISSUER_QR_CODE_KEY, Base64url.encode(config.issuer().getBytes()))
-                .addUriQueryComponent(MESSAGE_ID_QR_CODE_KEY, messageId)
-                .addUriQueryComponent(SHARED_SECRET_QR_CODE_KEY,
-                        Base64url.encode(org.forgerock.util.encode.Base64.decode(deviceProfile.getSharedSecret())))
-                .addUriQueryComponent(BGCOLOUR_QR_CODE_KEY, config.color())
-                .addUriQueryComponent(CHALLENGE_QR_CODE_KEY, Base64url.encode(org.forgerock.util.encode.Base64.decode(challenge)))
-                .addUriQueryComponent(REG_QR_CODE_KEY, Base64url.encode(("https://jonk.frdpcloud.com/openam/json/push/sns/message?_action=register").getBytes()))
-                .addUriQueryComponent(AUTH_QR_CODE_KEY,  Base64url.encode(("https://jonk.frdpcloud.com/openam/json/push/sns/message?_action=authenticate").getBytes() ));
+    private Callback createQRCodeCallback(PushDeviceSettings deviceProfile, AMIdentity id, String messageId, String challenge, String serverUrl, String realm) throws NodeProcessException {
+
+        QRCallbackBuilder builder;
+        try {
+            builder = new QRCallbackBuilder().withUriScheme("pushauth")
+                    .withUriHost("push")
+                    .withUriPath("forgerock")
+                    .withUriPort(id.getName())
+                    .withCallbackIndex(0)
+                    .addUriQueryComponent(LOADBALANCER_DATA_QR_CODE_KEY,
+                            Base64url.encode(sessionCookies.getLBCookie().getBytes()))
+                    .addUriQueryComponent(ISSUER_QR_CODE_KEY, Base64url.encode(config.issuer().getBytes()))
+                    .addUriQueryComponent(MESSAGE_ID_QR_CODE_KEY, messageId)
+                    .addUriQueryComponent(SHARED_SECRET_QR_CODE_KEY,
+                            Base64url.encode(org.forgerock.util.encode.Base64.decode(deviceProfile.getSharedSecret())))
+                    .addUriQueryComponent(BGCOLOUR_QR_CODE_KEY, config.color())
+                    .addUriQueryComponent(CHALLENGE_QR_CODE_KEY, Base64url.encode(org.forgerock.util.encode.Base64.decode(challenge)))
+                    .addUriQueryComponent(REG_QR_CODE_KEY, Base64url.encode((serverUrl + "/json" + pushNotificationService.getServiceAddressFor(realm, DefaultMessageTypes.REGISTER)).getBytes()))
+                    .addUriQueryComponent(AUTH_QR_CODE_KEY, Base64url.encode((serverUrl + "/json" + pushNotificationService.getServiceAddressFor(realm, DefaultMessageTypes.AUTHENTICATE)).getBytes()));
+        } catch (PushNotificationException e) {
+            throw new NodeProcessException("Unable to generate QR code");
+        }
 
         if (config.imgUrl() != null) {
             builder.addUriQueryComponent(IMG_QR_CODE_KEY, Base64url.encode(config.imgUrl().getBytes()));
@@ -287,7 +295,7 @@ public class PushRegNode implements Node {
 
             AMIdentity userIdentity = coreWrapper.getIdentity(username, realm);
 
-            Callback QRcallback = createQRCodeCallback(newDeviceRegistrationProfile, userIdentity, messageId.toString(), challenge);
+            Callback QRcallback = createQRCodeCallback(newDeviceRegistrationProfile, userIdentity, messageId.toString(), challenge, context.request.serverUrl, realm);
 
             PollingWaitCallback pollingWaitCallback = PollingWaitCallback.makeCallback()
                     .withWaitTime(String.valueOf(config.timeout()))
