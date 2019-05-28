@@ -51,7 +51,7 @@ public class PushRegNodePlugin extends AbstractNodeAmPlugin {
 
     @Override
     public String getPluginVersion() {
-        return "2.0.0";
+        return "2.0.3";
     }
 
     @Override

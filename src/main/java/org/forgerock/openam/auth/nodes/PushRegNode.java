@@ -23,7 +23,6 @@
 package org.forgerock.openam.auth.nodes;
 
 import com.google.inject.assistedinject.Assisted;
-import com.sun.identity.authentication.callbacks.ScriptTextOutputCallback;
 import com.sun.identity.idm.AMIdentity;
 import com.sun.identity.shared.debug.Debug;
 import org.forgerock.json.JsonValue;
@@ -31,7 +30,6 @@ import org.forgerock.openam.annotations.sm.Attribute;
 import org.forgerock.openam.auth.node.api.*;
 import org.forgerock.openam.authentication.callbacks.PollingWaitCallback;
 import org.forgerock.openam.core.CoreWrapper;
-import org.forgerock.openam.services.baseurl.BaseURLProvider;
 import org.forgerock.openam.services.baseurl.BaseURLProviderFactory;
 import org.forgerock.openam.services.push.*;
 import org.forgerock.openam.services.push.dispatch.handlers.ClusterMessageHandler;
@@ -39,7 +37,6 @@ import org.forgerock.openam.session.SessionCookies;
 import org.forgerock.util.encode.Base64;
 
 import javax.inject.Inject;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import static org.forgerock.openam.auth.node.api.Action.send;
 import static org.forgerock.openam.auth.node.api.SharedStateConstants.USERNAME;
@@ -89,7 +86,6 @@ public class PushRegNode implements Node {
         default String color() { return "519387"; }
         @Attribute(order = 500)
         default String imgUrl() { return ""; }
-
     }
 
 
@@ -169,6 +165,7 @@ public class PushRegNode implements Node {
                     .addUriQueryComponent(REG_QR_CODE_KEY, Base64url.encode((serverUrl + "/json" + pushNotificationService.getServiceAddressFor(realm, DefaultMessageTypes.REGISTER)).getBytes()))
                     .addUriQueryComponent(AUTH_QR_CODE_KEY, Base64url.encode((serverUrl + "/json" + pushNotificationService.getServiceAddressFor(realm, DefaultMessageTypes.AUTHENTICATE)).getBytes()));
         } catch (PushNotificationException e) {
+            debug.error("Unable to generate QR code");
             throw new NodeProcessException("Unable to generate QR code");
         }
 
@@ -214,6 +211,52 @@ public class PushRegNode implements Node {
     }
 
 
+
+    private Callback[] generateCallbacks(TreeContext context, String username, String realm, PushDeviceSettings newDeviceRegistrationProfile, MessageId messageId) {
+        String challenge = userPushDeviceProfileManager.createRandomBytes();
+
+        AMIdentity userIdentity = coreWrapper.getIdentity(username, realm);
+
+        Callback QRcallback;
+        try {
+            QRcallback = createQRCodeCallback(newDeviceRegistrationProfile, userIdentity, messageId.toString(), challenge, context.request.serverUrl, realm);
+        } catch (NodeProcessException e) {
+            return null;
+        }
+
+        PollingWaitCallback pollingWaitCallback = PollingWaitCallback.makeCallback()
+                .withWaitTime(String.valueOf(config.timeout()))
+                .build();
+
+        Callback[] callbacks = new Callback[]{QRcallback, pollingWaitCallback};
+
+        byte[] secret = Base64.decode(newDeviceRegistrationProfile.getSharedSecret());
+
+        Set<Predicate> servicePredicates = new HashSet<>();
+
+        servicePredicates.add(new SignedJwtVerificationPredicate(secret, JWT));
+        servicePredicates.add(new PushMessageChallengeResponsePredicate(secret, challenge, JWT));
+
+        try {
+            PushNotificationService pushService = getPushNotificationService(realm);
+
+            Set<Predicate> predicates = pushService.getMessagePredicatesFor(realm).get(DefaultMessageTypes.REGISTER);
+            if (predicates != null) {
+                servicePredicates.addAll(predicates);
+            }
+
+            pushService.getMessageDispatcher(realm).expectInCluster(messageId, servicePredicates);
+        } catch (NotFoundException | PushNotificationException e) {
+            debug.error("Unable to read service addresses for Push Notification Service.");
+        } catch (CoreTokenException e) {
+            debug.error("Unable to persist token in core token service.", e);
+        } catch (NodeProcessException e) {
+            debug.error("Unable to get push notification service");
+        }
+        return callbacks;
+    }
+
+
     @Override
     public Action process(TreeContext context) throws NodeProcessException {
 
@@ -221,10 +264,9 @@ public class PushRegNode implements Node {
         String realm = context.sharedState.get(SharedStateConstants.REALM).asString();
         String username = context.sharedState.get(USERNAME).asString();
 
-        // Callback responses ?
-        Optional<ScriptTextOutputCallback> scriptCallback = context.getCallback(ScriptTextOutputCallback.class);
-        if (scriptCallback.isPresent()) {
 
+        Optional<PollingWaitCallback> pollingCallback = context.getCallback(PollingWaitCallback.class);
+        if (pollingCallback.isPresent()) {
             if (!context.sharedState.isDefined(MESSAGE_ID_KEY)) {
                 debug.error("Unable to find push message ID in sharedState");
                 throw new NodeProcessException("Unable to find push message ID");
@@ -266,11 +308,20 @@ public class PushRegNode implements Node {
                         if (attempts >= config.retries()) {
                             return goTo("timeout").build();
                         } else {
-                            PollingWaitCallback pollingWaitCallback = PollingWaitCallback.makeCallback()
-                                    .withWaitTime(String.valueOf(config.timeout()))
+                            PushDeviceSettings newDeviceRegistrationProfile = userPushDeviceProfileManager.createDeviceProfile();
+                            debug.error(newDeviceRegistrationProfile.toString());
+
+                            newSharedState.put(PUSH_SECRET, newDeviceRegistrationProfile.getSharedSecret());
+                            newSharedState.put(PUSH_UUID, newDeviceRegistrationProfile.getUUID());
+                            newSharedState.put(PUSH_RETRIES, attempts+1);
+
+                            messageId = messageIdFactory.create(DefaultMessageTypes.REGISTER);
+
+                            Callback[] callbacks = generateCallbacks(context, username, realm, newDeviceRegistrationProfile, messageId);
+
+                            return send(callbacks)
+                                    .replaceSharedState(newSharedState.put(MESSAGE_ID_KEY, messageId.toString()))
                                     .build();
-                            Callback[] callbacks = new Callback[]{scriptCallback.get(), pollingWaitCallback};
-                            return send(callbacks).replaceSharedState(context.sharedState.copy().put(PUSH_RETRIES, attempts + 1)).build();
                         }
                     default:
                         throw new NodeProcessException("Unrecognized push message status: " + state);
@@ -280,50 +331,18 @@ public class PushRegNode implements Node {
             }
 
         } else {
+            JsonValue newSharedState = context.sharedState.copy();
 
             PushDeviceSettings newDeviceRegistrationProfile = userPushDeviceProfileManager.createDeviceProfile();
             debug.error(newDeviceRegistrationProfile.toString());
 
-            JsonValue newSharedState = context.sharedState.copy();
             newSharedState.put(PUSH_SECRET, newDeviceRegistrationProfile.getSharedSecret());
             newSharedState.put(PUSH_UUID, newDeviceRegistrationProfile.getUUID());
             newSharedState.put(PUSH_RETRIES, 0);
 
             MessageId messageId = messageIdFactory.create(DefaultMessageTypes.REGISTER);
 
-            String challenge = userPushDeviceProfileManager.createRandomBytes();
-
-            AMIdentity userIdentity = coreWrapper.getIdentity(username, realm);
-
-            Callback QRcallback = createQRCodeCallback(newDeviceRegistrationProfile, userIdentity, messageId.toString(), challenge, context.request.serverUrl, realm);
-
-            PollingWaitCallback pollingWaitCallback = PollingWaitCallback.makeCallback()
-                    .withWaitTime(String.valueOf(config.timeout()))
-                    .build();
-
-            Callback[] callbacks = new Callback[]{QRcallback, pollingWaitCallback};
-
-            byte[] secret = Base64.decode(newDeviceRegistrationProfile.getSharedSecret());
-
-            Set<Predicate> servicePredicates = new HashSet<>();
-
-            servicePredicates.add(new SignedJwtVerificationPredicate(secret, JWT));
-            servicePredicates.add(new PushMessageChallengeResponsePredicate(secret, challenge, JWT));
-
-            PushNotificationService pushService = getPushNotificationService(realm);
-
-            try {
-                Set<Predicate> predicates = pushService.getMessagePredicatesFor(realm).get(DefaultMessageTypes.REGISTER);
-                if (predicates != null) {
-                    servicePredicates.addAll(predicates);
-                }
-
-                pushService.getMessageDispatcher(realm).expectInCluster(messageId, servicePredicates);
-            } catch (NotFoundException | PushNotificationException e) {
-                debug.error("Unable to read service addresses for Push Notification Service.");
-            } catch (CoreTokenException e) {
-                debug.error("Unable to persist token in core token service.", e);
-            }
+            Callback[] callbacks = generateCallbacks(context, username, realm, newDeviceRegistrationProfile, messageId);
 
             return send(callbacks)
                     .replaceSharedState(newSharedState.put(MESSAGE_ID_KEY, messageId.toString()))
