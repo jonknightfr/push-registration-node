@@ -120,10 +120,11 @@ public class PushRegNode implements Node {
     /** The key for the total JWS challenge for registration. */
     static final String ISSUER_QR_CODE_KEY = "issuer";
 
-    static final String MESSAGE_ID_KEY = "pushMessageId";
-    static final String PUSH_SECRET = "PUSH_SECRET";
     static final String PUSH_UUID = "PUSH_UUID";
+    static final String PUSH_SHAREDSECRET = "PUSH_SHAREDSECRET";
+    static final String PUSH_CHALLENGE = "PUSH_CHALLENGE";
     static final String PUSH_RETRIES = "PUSH_RETRIES";
+    static final String PUSH_MESSAGEID = "PUSH_MESSAGEID";
 
 
     /**
@@ -212,14 +213,14 @@ public class PushRegNode implements Node {
 
 
 
-    private Callback[] generateCallbacks(TreeContext context, String username, String realm, PushDeviceSettings newDeviceRegistrationProfile, MessageId messageId) {
-        String challenge = userPushDeviceProfileManager.createRandomBytes();
-
+    private Callback[] generateCallbacks(TreeContext context, PushDeviceSettings newDeviceRegistrationProfile, String messageId, String challenge) {
+        String realm = context.sharedState.get(SharedStateConstants.REALM).asString();
+        String username = context.sharedState.get(USERNAME).asString();
         AMIdentity userIdentity = coreWrapper.getIdentity(username, realm);
 
         Callback QRcallback;
         try {
-            QRcallback = createQRCodeCallback(newDeviceRegistrationProfile, userIdentity, messageId.toString(), challenge, context.request.serverUrl, realm);
+            QRcallback = createQRCodeCallback(newDeviceRegistrationProfile, userIdentity, messageId, challenge, context.request.serverUrl, realm);
         } catch (NodeProcessException e) {
             return null;
         }
@@ -230,29 +231,6 @@ public class PushRegNode implements Node {
 
         Callback[] callbacks = new Callback[]{QRcallback, pollingWaitCallback};
 
-        byte[] secret = Base64.decode(newDeviceRegistrationProfile.getSharedSecret());
-
-        Set<Predicate> servicePredicates = new HashSet<>();
-
-        servicePredicates.add(new SignedJwtVerificationPredicate(secret, JWT));
-        servicePredicates.add(new PushMessageChallengeResponsePredicate(secret, challenge, JWT));
-
-        try {
-            PushNotificationService pushService = getPushNotificationService(realm);
-
-            Set<Predicate> predicates = pushService.getMessagePredicatesFor(realm).get(DefaultMessageTypes.REGISTER);
-            if (predicates != null) {
-                servicePredicates.addAll(predicates);
-            }
-
-            pushService.getMessageDispatcher(realm).expectInCluster(messageId, servicePredicates);
-        } catch (NotFoundException | PushNotificationException e) {
-            debug.error("Unable to read service addresses for Push Notification Service.");
-        } catch (CoreTokenException e) {
-            debug.error("Unable to persist token in core token service.", e);
-        } catch (NodeProcessException e) {
-            debug.error("Unable to get push notification service");
-        }
         return callbacks;
     }
 
@@ -267,12 +245,12 @@ public class PushRegNode implements Node {
 
         Optional<PollingWaitCallback> pollingCallback = context.getCallback(PollingWaitCallback.class);
         if (pollingCallback.isPresent()) {
-            if (!context.sharedState.isDefined(MESSAGE_ID_KEY)) {
+            if (!context.sharedState.isDefined(PUSH_MESSAGEID)) {
                 debug.error("Unable to find push message ID in sharedState");
                 throw new NodeProcessException("Unable to find push message ID");
             }
 
-            String pushMessageId = context.sharedState.get(MESSAGE_ID_KEY).asString();
+            String pushMessageId = context.sharedState.get(PUSH_MESSAGEID).asString();
             try {
                 MessageId messageId = messageIdFactory.create(pushMessageId, realm);
                 ClusterMessageHandler messageHandler = pushNotificationService.getMessageHandlers(realm).get(messageId.getMessageType());
@@ -294,10 +272,11 @@ public class PushRegNode implements Node {
                         JsonValue pushContent = messageHandler.getContents(messageId);
                         messageHandler.delete(messageId);
                         if (pushContent != null) {
-                            saveDeviceDetailsUnderUserAccount(pushContent, username, realm, context.sharedState.get(PUSH_UUID).asString(), context.sharedState.get(PUSH_SECRET).asString());
-                            newSharedState.remove(MESSAGE_ID_KEY);
-                            newSharedState.remove(PUSH_SECRET);
+                            saveDeviceDetailsUnderUserAccount(pushContent, username, realm, context.sharedState.get(PUSH_UUID).asString(), context.sharedState.get(PUSH_SHAREDSECRET).asString());
+                            newSharedState.remove(PUSH_MESSAGEID);
+                            newSharedState.remove(PUSH_SHAREDSECRET);
                             newSharedState.remove(PUSH_UUID);
+                            newSharedState.remove(PUSH_CHALLENGE);
                             return goTo("success").replaceSharedState(newSharedState).build();
                         } else throw new NodeProcessException("Failed to save device to user profile");
                     case DENIED:
@@ -308,19 +287,18 @@ public class PushRegNode implements Node {
                         if (attempts >= config.retries()) {
                             return goTo("timeout").build();
                         } else {
-                            PushDeviceSettings newDeviceRegistrationProfile = userPushDeviceProfileManager.createDeviceProfile();
-                            debug.error(newDeviceRegistrationProfile.toString());
 
-                            newSharedState.put(PUSH_SECRET, newDeviceRegistrationProfile.getSharedSecret());
-                            newSharedState.put(PUSH_UUID, newDeviceRegistrationProfile.getUUID());
+                            PushDeviceSettings newDeviceRegistrationProfile = userPushDeviceProfileManager.createDeviceProfile();
+                            newDeviceRegistrationProfile.setUUID(newSharedState.get(PUSH_UUID).asString());
+                            newDeviceRegistrationProfile.setSharedSecret(newSharedState.get(PUSH_SHAREDSECRET).asString());
+                            String challenge = newSharedState.get(PUSH_CHALLENGE).asString();
+                            String messageIdStr = newSharedState.get(PUSH_MESSAGEID).asString();
                             newSharedState.put(PUSH_RETRIES, attempts+1);
 
-                            messageId = messageIdFactory.create(DefaultMessageTypes.REGISTER);
-
-                            Callback[] callbacks = generateCallbacks(context, username, realm, newDeviceRegistrationProfile, messageId);
+                            Callback[] callbacks = generateCallbacks(context, newDeviceRegistrationProfile, messageIdStr, challenge);
 
                             return send(callbacks)
-                                    .replaceSharedState(newSharedState.put(MESSAGE_ID_KEY, messageId.toString()))
+                                    .replaceSharedState(newSharedState.put(PUSH_MESSAGEID, messageIdStr))
                                     .build();
                         }
                     default:
@@ -336,16 +314,46 @@ public class PushRegNode implements Node {
             PushDeviceSettings newDeviceRegistrationProfile = userPushDeviceProfileManager.createDeviceProfile();
             debug.error(newDeviceRegistrationProfile.toString());
 
-            newSharedState.put(PUSH_SECRET, newDeviceRegistrationProfile.getSharedSecret());
-            newSharedState.put(PUSH_UUID, newDeviceRegistrationProfile.getUUID());
-            newSharedState.put(PUSH_RETRIES, 0);
-
             MessageId messageId = messageIdFactory.create(DefaultMessageTypes.REGISTER);
 
-            Callback[] callbacks = generateCallbacks(context, username, realm, newDeviceRegistrationProfile, messageId);
+            //Callback[] callbacks = generateCallbacks(context, username, realm, newDeviceRegistrationProfile, messageId);
+
+            String challenge = userPushDeviceProfileManager.createRandomBytes();
+
+            Callback[] callbacks = generateCallbacks(context, newDeviceRegistrationProfile, messageId.toString(), challenge);
+            newSharedState.put(PUSH_UUID, newDeviceRegistrationProfile.getUUID());
+            newSharedState.put(PUSH_SHAREDSECRET, newDeviceRegistrationProfile.getSharedSecret());
+            newSharedState.put(PUSH_CHALLENGE, challenge);
+            newSharedState.put(PUSH_MESSAGEID, messageId.toString());
+            newSharedState.put(PUSH_RETRIES, 0);
+
+
+            byte[] secret = Base64.decode(newDeviceRegistrationProfile.getSharedSecret());
+
+            Set<Predicate> servicePredicates = new HashSet<>();
+
+            servicePredicates.add(new SignedJwtVerificationPredicate(secret, JWT));
+            servicePredicates.add(new PushMessageChallengeResponsePredicate(secret, challenge, JWT));
+
+            try {
+                PushNotificationService pushService = getPushNotificationService(realm);
+
+                Set<Predicate> predicates = pushService.getMessagePredicatesFor(realm).get(DefaultMessageTypes.REGISTER);
+                if (predicates != null) {
+                    servicePredicates.addAll(predicates);
+                }
+
+                pushService.getMessageDispatcher(realm).expectInCluster(messageId, servicePredicates);
+            } catch (NotFoundException | PushNotificationException e) {
+                debug.error("Unable to read service addresses for Push Notification Service.");
+            } catch (CoreTokenException e) {
+                debug.error("Unable to persist token in core token service.", e);
+            } catch (NodeProcessException e) {
+                debug.error("Unable to get push notification service");
+            }
 
             return send(callbacks)
-                    .replaceSharedState(newSharedState.put(MESSAGE_ID_KEY, messageId.toString()))
+                    .replaceSharedState(newSharedState.put(PUSH_MESSAGEID, messageId.toString()))
                     .build();
         }
     }
