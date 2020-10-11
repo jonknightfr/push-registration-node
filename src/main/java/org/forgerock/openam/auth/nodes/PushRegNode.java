@@ -49,7 +49,7 @@ import org.forgerock.openam.authentication.callbacks.helpers.QRCallbackBuilder;
 import org.forgerock.openam.core.rest.devices.DevicePersistenceException;
 import org.forgerock.openam.core.rest.devices.push.PushDeviceSettings;
 import org.forgerock.openam.core.rest.devices.push.UserPushDeviceProfileManager;
-import org.forgerock.openam.cts.exceptions.CoreTokenException;
+import org.forgerock.am.cts.exceptions.CoreTokenException;
 import org.forgerock.openam.services.push.dispatch.predicates.Predicate;
 import org.forgerock.openam.services.push.dispatch.predicates.PushMessageChallengeResponsePredicate;
 import org.forgerock.openam.services.push.dispatch.predicates.SignedJwtVerificationPredicate;

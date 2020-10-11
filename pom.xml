@@ -22,7 +22,7 @@
     <parent>
         <artifactId>openam-auth-trees</artifactId>
         <groupId>org.forgerock.am</groupId>
-        <version>6.5.0</version>
+        <version>7.0.0</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -68,6 +68,13 @@
 		<dependency>
 			<groupId>org.forgerock.am</groupId>
 			<artifactId>auth-nodes</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.forgerock.am</groupId>
+			<artifactId>cts-api</artifactId>
+			<version>7.0.0</version>
+			<scope>provided</scope>
+			<!--            <systemPath>${project.basedir}/libs/cts-api-7.0.0.jar</systemPath>-->
 		</dependency>
 
 

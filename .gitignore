@@ -1,0 +1,10 @@
+# Created by .gitignore support plugin (hsz.mobi)
+
+*.iml
+.idea
+.project
+.classpath
+.factorypath
+**/.settings
+target
+overlays
