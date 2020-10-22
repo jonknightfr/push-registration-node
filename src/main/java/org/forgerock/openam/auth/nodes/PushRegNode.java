@@ -13,93 +13,73 @@
  *
  * Copyright 2017 ForgeRock AS.
  */
-/**
- * jon.knight@forgerock.com
- *
- * A node that registers a mobile device for SNS push notifications
+/*
+  jon.knight@forgerock.com
+  <p>
+  A node that registers a mobile device for SNS push notifications
  */
 
 
 package org.forgerock.openam.auth.nodes;
 
-import com.google.inject.assistedinject.Assisted;
-import com.sun.identity.idm.AMIdentity;
-import com.sun.identity.shared.debug.Debug;
-import org.forgerock.json.JsonValue;
-import org.forgerock.openam.annotations.sm.Attribute;
-import org.forgerock.openam.auth.node.api.*;
-import org.forgerock.openam.authentication.callbacks.PollingWaitCallback;
-import org.forgerock.openam.core.CoreWrapper;
-import org.forgerock.openam.services.baseurl.BaseURLProviderFactory;
-import org.forgerock.openam.services.push.*;
-import org.forgerock.openam.services.push.dispatch.handlers.ClusterMessageHandler;
-import org.forgerock.openam.session.SessionCookies;
-import org.forgerock.util.encode.Base64;
-
-import javax.inject.Inject;
-import java.util.*;
 import static org.forgerock.openam.auth.node.api.Action.send;
 import static org.forgerock.openam.auth.node.api.SharedStateConstants.USERNAME;
+import static org.forgerock.openam.services.push.PushNotificationConstants.COMMUNICATION_ID;
+import static org.forgerock.openam.services.push.PushNotificationConstants.COMMUNICATION_TYPE;
+import static org.forgerock.openam.services.push.PushNotificationConstants.DEVICE_ID;
+import static org.forgerock.openam.services.push.PushNotificationConstants.DEVICE_TYPE;
 import static org.forgerock.openam.services.push.PushNotificationConstants.JWT;
-import static org.forgerock.openam.services.push.PushNotificationConstants.*;
+import static org.forgerock.openam.services.push.PushNotificationConstants.MECHANISM_UID;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.ResourceBundle;
+import java.util.Set;
+
+import javax.inject.Inject;
 import javax.security.auth.callback.Callback;
 
+import org.forgerock.am.cts.exceptions.CoreTokenException;
+import org.forgerock.json.JsonValue;
 import org.forgerock.json.resource.NotFoundException;
+import org.forgerock.openam.annotations.sm.Attribute;
+import org.forgerock.openam.auth.node.api.Action;
+import org.forgerock.openam.auth.node.api.Node;
+import org.forgerock.openam.auth.node.api.NodeProcessException;
+import org.forgerock.openam.auth.node.api.SharedStateConstants;
+import org.forgerock.openam.auth.node.api.TreeContext;
+import org.forgerock.openam.authentication.callbacks.PollingWaitCallback;
 import org.forgerock.openam.authentication.callbacks.helpers.QRCallbackBuilder;
+import org.forgerock.openam.core.CoreWrapper;
 import org.forgerock.openam.core.rest.devices.DevicePersistenceException;
 import org.forgerock.openam.core.rest.devices.push.PushDeviceSettings;
 import org.forgerock.openam.core.rest.devices.push.UserPushDeviceProfileManager;
-import org.forgerock.openam.cts.exceptions.CoreTokenException;
-import org.forgerock.openam.services.push.dispatch.predicates.Predicate;
-import org.forgerock.openam.services.push.dispatch.predicates.PushMessageChallengeResponsePredicate;
-import org.forgerock.openam.services.push.dispatch.predicates.SignedJwtVerificationPredicate;
-import org.forgerock.util.encode.Base64url;
-
 import org.forgerock.openam.services.push.DefaultMessageTypes;
 import org.forgerock.openam.services.push.MessageId;
 import org.forgerock.openam.services.push.MessageIdFactory;
+import org.forgerock.openam.services.push.MessageState;
 import org.forgerock.openam.services.push.PushNotificationException;
 import org.forgerock.openam.services.push.PushNotificationService;
-import com.google.common.collect.ImmutableList;
+import org.forgerock.openam.services.push.dispatch.handlers.ClusterMessageHandler;
+import org.forgerock.openam.services.push.dispatch.predicates.Predicate;
+import org.forgerock.openam.services.push.dispatch.predicates.PushMessageChallengeResponsePredicate;
+import org.forgerock.openam.services.push.dispatch.predicates.SignedJwtVerificationPredicate;
+import org.forgerock.openam.session.SessionCookies;
+import org.forgerock.util.encode.Base64;
+import org.forgerock.util.encode.Base64url;
 import org.forgerock.util.i18n.PreferredLocales;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import com.google.common.collect.ImmutableList;
+import com.google.inject.assistedinject.Assisted;
+import com.sun.identity.idm.AMIdentity;
 
-/**
- * An authentication node integrating with iProov face recognition solution.
- */
 
 @Node.Metadata(outcomeProvider = PushRegNode.OutcomeProvider.class,
-        configClass = PushRegNode.Config.class)
+        configClass = PushRegNode.Config.class, tags = {"mfa", "multi-factor authentication"})
 public class PushRegNode implements Node {
-
-    /**
-     * Configuration for the node.
-     */
-    public interface Config {
-        @Attribute(order = 100)
-        default String issuer() { return "ForgeRock"; }
-        @Attribute(order = 200)
-        default int timeout() { return 4000; }
-        @Attribute(order = 300)
-        default int retries() { return 15; }
-        @Attribute(order = 400)
-        default String color() { return "519387"; }
-        @Attribute(order = 500)
-        default String imgUrl() { return ""; }
-    }
-
-
-    private final Config config;
-    private final CoreWrapper coreWrapper;
-    private final static String DEBUG_FILE = "PushRegNode";
-    protected Debug debug = Debug.getInstance(DEBUG_FILE);
-
-
-    private final UserPushDeviceProfileManager userPushDeviceProfileManager;
-    private final PushNotificationService pushNotificationService;
-    private final MessageIdFactory messageIdFactory;
-    private final SessionCookies sessionCookies;
-    private BaseURLProviderFactory baseUrlProviderFactory;
 
     /** The key for the Message Id query component of the QR code. */
     static final String MESSAGE_ID_QR_CODE_KEY = "m";
@@ -119,24 +99,45 @@ public class PushRegNode implements Node {
     static final String CHALLENGE_QR_CODE_KEY = "c";
     /** The key for the total JWS challenge for registration. */
     static final String ISSUER_QR_CODE_KEY = "issuer";
-
     static final String PUSH_UUID = "PUSH_UUID";
     static final String PUSH_SHAREDSECRET = "PUSH_SHAREDSECRET";
     static final String PUSH_CHALLENGE = "PUSH_CHALLENGE";
     static final String PUSH_RETRIES = "PUSH_RETRIES";
     static final String PUSH_MESSAGEID = "PUSH_MESSAGEID";
-
+    private final Config config;
+    private final CoreWrapper coreWrapper;
+    private final Logger logger = LoggerFactory.getLogger("amAuth");
+    private final UserPushDeviceProfileManager userPushDeviceProfileManager;
+    private final PushNotificationService pushNotificationService;
+    private final MessageIdFactory messageIdFactory;
+    private final SessionCookies sessionCookies;
 
     /**
-     * Guice constructor.
-     * @param config The node configuration.
-     * @throws NodeProcessException If there is an error reading the configuration.
+     * Configuration for the node.
      */
+    public interface Config {
+        @Attribute(order = 100)
+        default String issuer() { return "ForgeRock"; }
+
+        @Attribute(order = 200)
+        default int timeout() { return 4000; }
+
+        @Attribute(order = 300)
+        default int retries() { return 15; }
+
+        @Attribute(order = 400)
+        default String color() { return "519387"; }
+
+        @Attribute(order = 500)
+        default String imgUrl() { return ""; }
+    }
+
     @Inject
     public PushRegNode(@Assisted Config config, CoreWrapper coreWrapper,
-                       UserPushDeviceProfileManager userPushDeviceProfileManager, PushNotificationService pushNotificationService,
+                       UserPushDeviceProfileManager userPushDeviceProfileManager,
+                       PushNotificationService pushNotificationService,
                        SessionCookies sessionCookies,
-                       MessageIdFactory messageIdFactory) throws NodeProcessException {
+                       MessageIdFactory messageIdFactory) {
         this.config = config;
         this.coreWrapper = coreWrapper;
         this.userPushDeviceProfileManager = userPushDeviceProfileManager;
@@ -146,27 +147,42 @@ public class PushRegNode implements Node {
     }
 
 
-    private Callback createQRCodeCallback(PushDeviceSettings deviceProfile, AMIdentity id, String messageId, String challenge, String serverUrl, String realm) throws NodeProcessException {
+    private Callback createQRCodeCallback(PushDeviceSettings deviceProfile, AMIdentity id, String messageId,
+                                          String challenge, String serverUrl, String realm)
+            throws NodeProcessException {
 
         QRCallbackBuilder builder;
         try {
             builder = new QRCallbackBuilder().withUriScheme("pushauth")
-                    .withUriHost("push")
-                    .withUriPath("forgerock")
-                    .withUriPort(id.getName())
-                    .withCallbackIndex(0)
-                    .addUriQueryComponent(LOADBALANCER_DATA_QR_CODE_KEY,
-                            Base64url.encode(sessionCookies.getLBCookie().getBytes()))
-                    .addUriQueryComponent(ISSUER_QR_CODE_KEY, Base64url.encode(config.issuer().getBytes()))
-                    .addUriQueryComponent(MESSAGE_ID_QR_CODE_KEY, messageId)
-                    .addUriQueryComponent(SHARED_SECRET_QR_CODE_KEY,
-                            Base64url.encode(org.forgerock.util.encode.Base64.decode(deviceProfile.getSharedSecret())))
-                    .addUriQueryComponent(BGCOLOUR_QR_CODE_KEY, config.color())
-                    .addUriQueryComponent(CHALLENGE_QR_CODE_KEY, Base64url.encode(org.forgerock.util.encode.Base64.decode(challenge)))
-                    .addUriQueryComponent(REG_QR_CODE_KEY, Base64url.encode((serverUrl + "/json" + pushNotificationService.getServiceAddressFor(realm, DefaultMessageTypes.REGISTER)).getBytes()))
-                    .addUriQueryComponent(AUTH_QR_CODE_KEY, Base64url.encode((serverUrl + "/json" + pushNotificationService.getServiceAddressFor(realm, DefaultMessageTypes.AUTHENTICATE)).getBytes()));
+                                             .withUriHost("push")
+                                             .withUriPath("forgerock")
+                                             .withUriPort(id.getName())
+                                             .withCallbackIndex(0)
+                                             .addUriQueryComponent(LOADBALANCER_DATA_QR_CODE_KEY,
+                                                                   Base64url.encode(sessionCookies.getLBCookie()
+                                                                                                  .getBytes()))
+                                             .addUriQueryComponent(ISSUER_QR_CODE_KEY,
+                                                                   Base64url.encode(config.issuer().getBytes()))
+                                             .addUriQueryComponent(MESSAGE_ID_QR_CODE_KEY, messageId)
+                                             .addUriQueryComponent(SHARED_SECRET_QR_CODE_KEY,
+                                                                   Base64url.encode(org.forgerock.util.encode.Base64
+                                                                                            .decode(deviceProfile
+                                                                                                            .getSharedSecret())))
+                                             .addUriQueryComponent(BGCOLOUR_QR_CODE_KEY, config.color())
+                                             .addUriQueryComponent(CHALLENGE_QR_CODE_KEY, Base64url
+                                                     .encode(org.forgerock.util.encode.Base64.decode(challenge)))
+                                             .addUriQueryComponent(REG_QR_CODE_KEY, Base64url
+                                                     .encode((serverUrl + "/json" +
+                                                             pushNotificationService.getServiceAddressFor(realm,
+                                                                                                          DefaultMessageTypes.REGISTER))
+                                                                     .getBytes()))
+                                             .addUriQueryComponent(AUTH_QR_CODE_KEY, Base64url
+                                                     .encode((serverUrl + "/json" +
+                                                             pushNotificationService.getServiceAddressFor(realm,
+                                                                                                          DefaultMessageTypes.AUTHENTICATE))
+                                                                     .getBytes()));
         } catch (PushNotificationException e) {
-            debug.error("Unable to generate QR code");
+            logger.error("Unable to generate QR code");
             throw new NodeProcessException("Unable to generate QR code");
         }
 
@@ -178,7 +194,8 @@ public class PushRegNode implements Node {
     }
 
 
-    private void saveDeviceDetailsUnderUserAccount(JsonValue deviceResponse, String username, String realm, String deviceId, String sharedSecret) {
+    private void saveDeviceDetailsUnderUserAccount(JsonValue deviceResponse, String username, String realm,
+                                                   String deviceId, String sharedSecret) {
         PushDeviceSettings newDeviceRegistrationProfile = new PushDeviceSettings();
         newDeviceRegistrationProfile.setDeviceName("Push Device");
 
@@ -192,7 +209,7 @@ public class PushRegNode implements Node {
             newDeviceRegistrationProfile.setDeviceId(deviceResponse.get(DEVICE_ID).asString());
             newDeviceRegistrationProfile.setIssuer(config.issuer());
         } catch (NullPointerException npe) {
-            debug.error("Blank value for necessary data from device response, {}", deviceResponse);
+            logger.error("Blank value for necessary data from device response, {}", deviceResponse);
         }
 
         /* RECOVERY CODES NOT IMPLEMENTED
@@ -207,38 +224,37 @@ public class PushRegNode implements Node {
         try {
             userPushDeviceProfileManager.saveDeviceProfile(username, realm, newDeviceRegistrationProfile);
         } catch (DevicePersistenceException e) {
-            debug.error("Unable to store device profile.");
+            logger.error("Unable to store device profile.");
         }
     }
 
 
-
-    private Callback[] generateCallbacks(TreeContext context, PushDeviceSettings newDeviceRegistrationProfile, String messageId, String challenge) {
+    private Callback[] generateCallbacks(TreeContext context, PushDeviceSettings newDeviceRegistrationProfile,
+                                         String messageId, String challenge) {
         String realm = context.sharedState.get(SharedStateConstants.REALM).asString();
         String username = context.sharedState.get(USERNAME).asString();
         AMIdentity userIdentity = coreWrapper.getIdentity(username, realm);
 
         Callback QRcallback;
         try {
-            QRcallback = createQRCodeCallback(newDeviceRegistrationProfile, userIdentity, messageId, challenge, context.request.serverUrl, realm);
+            QRcallback = createQRCodeCallback(newDeviceRegistrationProfile, userIdentity, messageId, challenge,
+                                              context.request.serverUrl, realm);
         } catch (NodeProcessException e) {
             return null;
         }
 
         PollingWaitCallback pollingWaitCallback = PollingWaitCallback.makeCallback()
-                .withWaitTime(String.valueOf(config.timeout()))
-                .build();
+                                                                     .withWaitTime(String.valueOf(config.timeout()))
+                                                                     .build();
 
-        Callback[] callbacks = new Callback[]{QRcallback, pollingWaitCallback};
-
-        return callbacks;
+        return new Callback[]{QRcallback, pollingWaitCallback};
     }
 
 
     @Override
     public Action process(TreeContext context) throws NodeProcessException {
 
-        debug.error("PushRegNode started.");
+        logger.debug("PushRegNode started.");
         String realm = context.sharedState.get(SharedStateConstants.REALM).asString();
         String username = context.sharedState.get(USERNAME).asString();
 
@@ -246,16 +262,18 @@ public class PushRegNode implements Node {
         Optional<PollingWaitCallback> pollingCallback = context.getCallback(PollingWaitCallback.class);
         if (pollingCallback.isPresent()) {
             if (!context.sharedState.isDefined(PUSH_MESSAGEID)) {
-                debug.error("Unable to find push message ID in sharedState");
+                logger.error("Unable to find push message ID in sharedState");
                 throw new NodeProcessException("Unable to find push message ID");
             }
 
             String pushMessageId = context.sharedState.get(PUSH_MESSAGEID).asString();
             try {
                 MessageId messageId = messageIdFactory.create(pushMessageId, realm);
-                ClusterMessageHandler messageHandler = pushNotificationService.getMessageHandlers(realm).get(messageId.getMessageType());
+                ClusterMessageHandler messageHandler = pushNotificationService.getMessageHandlers(realm).get(
+                        messageId.getMessageType());
                 if (messageHandler == null) {
-                    debug.error("The push message corresponds to {} message type which is not registered in the {} realm",
+                    logger.error(
+                            "The push message corresponds to {} message type which is not registered in the {} realm",
                             messageId.getMessageType(), realm);
                     throw new NodeProcessException("Unknown message type");
                 }
@@ -263,7 +281,7 @@ public class PushRegNode implements Node {
 
                 JsonValue newSharedState = context.sharedState.copy();
                 if (state == null) {
-                    debug.error("The push message with ID {} has timed out", messageId.toString());
+                    logger.error("The push message with ID {} has timed out", messageId.toString());
                     throw new NodeProcessException("Message timed out");
                 }
 
@@ -272,13 +290,17 @@ public class PushRegNode implements Node {
                         JsonValue pushContent = messageHandler.getContents(messageId);
                         messageHandler.delete(messageId);
                         if (pushContent != null) {
-                            saveDeviceDetailsUnderUserAccount(pushContent, username, realm, context.sharedState.get(PUSH_UUID).asString(), context.sharedState.get(PUSH_SHAREDSECRET).asString());
+                            saveDeviceDetailsUnderUserAccount(pushContent, username, realm,
+                                                              context.sharedState.get(PUSH_UUID).asString(),
+                                                              context.sharedState.get(PUSH_SHAREDSECRET).asString());
                             newSharedState.remove(PUSH_MESSAGEID);
                             newSharedState.remove(PUSH_SHAREDSECRET);
                             newSharedState.remove(PUSH_UUID);
                             newSharedState.remove(PUSH_CHALLENGE);
                             return goTo("success").replaceSharedState(newSharedState).build();
-                        } else throw new NodeProcessException("Failed to save device to user profile");
+                        } else {
+                            throw new NodeProcessException("Failed to save device to user profile");
+                        }
                     case DENIED:
                         messageHandler.delete(messageId);
                         throw new NodeProcessException("App denied registration");
@@ -288,18 +310,26 @@ public class PushRegNode implements Node {
                             return goTo("timeout").build();
                         } else {
 
-                            PushDeviceSettings newDeviceRegistrationProfile = userPushDeviceProfileManager.createDeviceProfile();
+                            PushDeviceSettings
+                                    newDeviceRegistrationProfile =
+                                    userPushDeviceProfileManager.createDeviceProfile();
                             newDeviceRegistrationProfile.setUUID(newSharedState.get(PUSH_UUID).asString());
-                            newDeviceRegistrationProfile.setSharedSecret(newSharedState.get(PUSH_SHAREDSECRET).asString());
+                            newDeviceRegistrationProfile.setSharedSecret(
+                                    newSharedState.get(PUSH_SHAREDSECRET).asString());
                             String challenge = newSharedState.get(PUSH_CHALLENGE).asString();
                             String messageIdStr = newSharedState.get(PUSH_MESSAGEID).asString();
-                            newSharedState.put(PUSH_RETRIES, attempts+1);
+                            newSharedState.put(PUSH_RETRIES, attempts + 1);
 
-                            Callback[] callbacks = generateCallbacks(context, newDeviceRegistrationProfile, messageIdStr, challenge);
+                            Callback[] callbacks = generateCallbacks(context, newDeviceRegistrationProfile,
+                                                                     messageIdStr, challenge);
 
-                            return send(callbacks)
-                                    .replaceSharedState(newSharedState.put(PUSH_MESSAGEID, messageIdStr))
-                                    .build();
+                            if (callbacks != null) {
+                                return send(callbacks)
+                                        .replaceSharedState(newSharedState.put(PUSH_MESSAGEID, messageIdStr))
+                                        .build();
+                            }
+                            logger.error("Unable to generate callbacks");
+                            throw new NodeProcessException("Callbacks are null");
                         }
                     default:
                         throw new NodeProcessException("Unrecognized push message status: " + state);
@@ -312,15 +342,14 @@ public class PushRegNode implements Node {
             JsonValue newSharedState = context.sharedState.copy();
 
             PushDeviceSettings newDeviceRegistrationProfile = userPushDeviceProfileManager.createDeviceProfile();
-            debug.error(newDeviceRegistrationProfile.toString());
+            logger.error(newDeviceRegistrationProfile.toString());
 
             MessageId messageId = messageIdFactory.create(DefaultMessageTypes.REGISTER);
 
-            //Callback[] callbacks = generateCallbacks(context, username, realm, newDeviceRegistrationProfile, messageId);
-
             String challenge = userPushDeviceProfileManager.createRandomBytes();
 
-            Callback[] callbacks = generateCallbacks(context, newDeviceRegistrationProfile, messageId.toString(), challenge);
+            Callback[] callbacks = generateCallbacks(context, newDeviceRegistrationProfile, messageId.toString(),
+                                                     challenge);
             newSharedState.put(PUSH_UUID, newDeviceRegistrationProfile.getUUID());
             newSharedState.put(PUSH_SHAREDSECRET, newDeviceRegistrationProfile.getSharedSecret());
             newSharedState.put(PUSH_CHALLENGE, challenge);
@@ -330,31 +359,36 @@ public class PushRegNode implements Node {
 
             byte[] secret = Base64.decode(newDeviceRegistrationProfile.getSharedSecret());
 
-            Set<Predicate> servicePredicates = new HashSet<>();
-
-            servicePredicates.add(new SignedJwtVerificationPredicate(secret, JWT));
-            servicePredicates.add(new PushMessageChallengeResponsePredicate(secret, challenge, JWT));
+            Set<Predicate> servicePredicates = new HashSet<>() {{
+                add(new SignedJwtVerificationPredicate(secret, JWT));
+                add(new PushMessageChallengeResponsePredicate(secret, challenge, JWT));
+            }};
 
             try {
                 PushNotificationService pushService = getPushNotificationService(realm);
 
-                Set<Predicate> predicates = pushService.getMessagePredicatesFor(realm).get(DefaultMessageTypes.REGISTER);
+                Set<Predicate> predicates = pushService.getMessagePredicatesFor(realm).get(
+                        DefaultMessageTypes.REGISTER);
                 if (predicates != null) {
                     servicePredicates.addAll(predicates);
                 }
 
                 pushService.getMessageDispatcher(realm).expectInCluster(messageId, servicePredicates);
             } catch (NotFoundException | PushNotificationException e) {
-                debug.error("Unable to read service addresses for Push Notification Service.");
+                logger.error("Unable to read service addresses for Push Notification Service.");
             } catch (CoreTokenException e) {
-                debug.error("Unable to persist token in core token service.", e);
+                logger.error("Unable to persist token in core token service.", e);
             } catch (NodeProcessException e) {
-                debug.error("Unable to get push notification service");
+                logger.error("Unable to get push notification service");
             }
 
-            return send(callbacks)
-                    .replaceSharedState(newSharedState.put(PUSH_MESSAGEID, messageId.toString()))
-                    .build();
+            if (callbacks != null) {
+                return send(callbacks)
+                        .replaceSharedState(newSharedState.put(PUSH_MESSAGEID, messageId.toString()))
+                        .build();
+            }
+            logger.error("Unable to generate callbacks");
+            throw new NodeProcessException("Callbacks are null");
         }
     }
 
