@@ -41,6 +41,7 @@ import javax.inject.Inject;
 import javax.security.auth.callback.Callback;
 
 import org.forgerock.am.cts.exceptions.CoreTokenException;
+import org.forgerock.guice.core.InjectorHolder;
 import org.forgerock.json.JsonValue;
 import org.forgerock.json.resource.NotFoundException;
 import org.forgerock.openam.annotations.sm.Attribute;
@@ -66,6 +67,9 @@ import org.forgerock.openam.services.push.dispatch.predicates.Predicate;
 import org.forgerock.openam.services.push.dispatch.predicates.PushMessageChallengeResponsePredicate;
 import org.forgerock.openam.services.push.dispatch.predicates.SignedJwtVerificationPredicate;
 import org.forgerock.openam.session.SessionCookies;
+import org.forgerock.openam.utils.Alphabet;
+import org.forgerock.openam.utils.CodeException;
+import org.forgerock.openam.utils.RecoveryCodeGenerator;
 import org.forgerock.util.encode.Base64;
 import org.forgerock.util.encode.Base64url;
 import org.forgerock.util.i18n.PreferredLocales;
@@ -81,23 +85,42 @@ import com.sun.identity.idm.AMIdentity;
         configClass = PushRegNode.Config.class, tags = {"mfa", "multi-factor authentication"})
 public class PushRegNode implements Node {
 
-    /** The key for the Message Id query component of the QR code. */
+    /**
+     * The key for the Message Id query component of the QR code.
+     */
     static final String MESSAGE_ID_QR_CODE_KEY = "m";
-    /** The key for the shared secret query component of the QR code. */
+    /**
+     * The key for the shared secret query component of the QR code.
+     */
     static final String SHARED_SECRET_QR_CODE_KEY = "s";
-    /** The key for the bgcolour query component of the QR code. */
+    /**
+     * The key for the bgcolour query component of the QR code.
+     */
     static final String BGCOLOUR_QR_CODE_KEY = "b";
-    /** The key for the Issuer query component of the QR code. */
+    /**
+     * The key for the Issuer query component of the QR code.
+     */
     static final String REG_QR_CODE_KEY = "r";
-    /** The key for the Issuer query component of the QR code. */
+    /**
+     * The key for the Issuer query component of the QR code.
+     */
     static final String AUTH_QR_CODE_KEY = "a";
-    /** The key for the Issuer query component of the QR code. */
+    /**
+     * The key for the Issuer query component of the QR code.
+     */
     static final String IMG_QR_CODE_KEY = "image";
-    /** The key for the loadbalancer information component of the QR code. */
+    /**
+     * The key for the loadbalancer information component of the QR code.
+     */
     static final String LOADBALANCER_DATA_QR_CODE_KEY = "l";
-    /** The key for the challenge inside the registration challenge. */
+    /**
+     * The key for the challenge inside the registration challenge.
+     */
     static final String CHALLENGE_QR_CODE_KEY = "c";
-    /** The key for the total JWS challenge for registration. */
+    /**
+     * Number of recovery codes to generate for webauthn devices by default.
+     */
+    static final int NUM_RECOVERY_CODES = 10;
     static final String ISSUER_QR_CODE_KEY = "issuer";
     static final String PUSH_UUID = "PUSH_UUID";
     static final String PUSH_SHAREDSECRET = "PUSH_SHAREDSECRET";
@@ -111,6 +134,8 @@ public class PushRegNode implements Node {
     private final PushNotificationService pushNotificationService;
     private final MessageIdFactory messageIdFactory;
     private final SessionCookies sessionCookies;
+    private final RecoveryCodeGenerator recoveryCodeGenerator = InjectorHolder.getInstance(RecoveryCodeGenerator.class);
+
 
     /**
      * Configuration for the node.
@@ -130,6 +155,9 @@ public class PushRegNode implements Node {
 
         @Attribute(order = 500)
         default String imgUrl() { return ""; }
+
+        @Attribute(order = 600)
+        default boolean generateRecoveryCodes() { return true; }
     }
 
     @Inject
@@ -193,15 +221,28 @@ public class PushRegNode implements Node {
         return builder.build();
     }
 
+    void setRecoveryCodesOnDevice(boolean generateRecoveryCodes, PushDeviceSettings device,
+                                  JsonValue transientState) throws CodeException {
+        //generate recovery codes
+        if (generateRecoveryCodes) {
+            logger.debug("creating recovery codes for device");
+            List<String> codes = recoveryCodeGenerator.generateCodes(NUM_RECOVERY_CODES, Alphabet.ALPHANUMERIC,
+                                                                     false);
+            device.setRecoveryCodes(codes);
+            transientState.put(RecoveryCodeDisplayNode.RECOVERY_CODE_KEY, codes);
+            transientState.put(RecoveryCodeDisplayNode.RECOVERY_CODE_DEVICE_NAME, device.getDeviceName());
+        }
+    }
+
 
     private void saveDeviceDetailsUnderUserAccount(JsonValue deviceResponse, String username, String realm,
-                                                   String deviceId, String sharedSecret) {
+                                                   TreeContext context) throws CodeException {
         PushDeviceSettings newDeviceRegistrationProfile = new PushDeviceSettings();
         newDeviceRegistrationProfile.setDeviceName("Push Device");
 
         try {
-            newDeviceRegistrationProfile.setUUID(deviceId);
-            newDeviceRegistrationProfile.setSharedSecret(sharedSecret);
+            newDeviceRegistrationProfile.setUUID(context.sharedState.get(PUSH_UUID).asString());
+            newDeviceRegistrationProfile.setSharedSecret(context.sharedState.get(PUSH_SHAREDSECRET).asString());
             newDeviceRegistrationProfile.setCommunicationId(deviceResponse.get(COMMUNICATION_ID).asString());
             newDeviceRegistrationProfile.setDeviceMechanismUID(deviceResponse.get(MECHANISM_UID).asString());
             newDeviceRegistrationProfile.setCommunicationType(deviceResponse.get(COMMUNICATION_TYPE).asString());
@@ -212,14 +253,7 @@ public class PushRegNode implements Node {
             logger.error("Blank value for necessary data from device response, {}", deviceResponse);
         }
 
-        /* RECOVERY CODES NOT IMPLEMENTED
-        try {
-            recoveryCodes = recoveryCodeGenerator.generateCodes(10, Alphabet.ALPHANUMERIC, false);
-            newDeviceRegistrationProfile.setRecoveryCodes(recoveryCodes);
-        } catch (CodeException e) {
-            debug.error("Insufficient recovery code generation occurred.");
-        }
-        */
+        setRecoveryCodesOnDevice(config.generateRecoveryCodes(), newDeviceRegistrationProfile, context.transientState);
 
         try {
             userPushDeviceProfileManager.saveDeviceProfile(username, realm, newDeviceRegistrationProfile);
@@ -290,14 +324,13 @@ public class PushRegNode implements Node {
                         JsonValue pushContent = messageHandler.getContents(messageId);
                         messageHandler.delete(messageId);
                         if (pushContent != null) {
-                            saveDeviceDetailsUnderUserAccount(pushContent, username, realm,
-                                                              context.sharedState.get(PUSH_UUID).asString(),
-                                                              context.sharedState.get(PUSH_SHAREDSECRET).asString());
+                            saveDeviceDetailsUnderUserAccount(pushContent, username, realm, context);
                             newSharedState.remove(PUSH_MESSAGEID);
                             newSharedState.remove(PUSH_SHAREDSECRET);
                             newSharedState.remove(PUSH_UUID);
                             newSharedState.remove(PUSH_CHALLENGE);
-                            return goTo("success").replaceSharedState(newSharedState).build();
+                            return goTo("success").replaceSharedState(newSharedState).replaceTransientState(
+                                    context.transientState).build();
                         } else {
                             throw new NodeProcessException("Failed to save device to user profile");
                         }
@@ -336,6 +369,8 @@ public class PushRegNode implements Node {
                 }
             } catch (PushNotificationException | CoreTokenException ex) {
                 throw new NodeProcessException("An unexpected error occurred while verifying the push result", ex);
+            } catch (CodeException e) {
+                throw new NodeProcessException("Unable to create device profile from response data.", e);
             }
 
         } else {

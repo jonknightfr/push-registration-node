@@ -23,6 +23,8 @@ package org.forgerock.openam.auth.nodes;
 
 import static java.util.Arrays.asList;
 
+import java.util.Collections;
+
 import javax.inject.Inject;
 
 import org.forgerock.openam.auth.node.api.AbstractNodeAmPlugin;
@@ -51,7 +53,7 @@ public class PushRegNodePlugin extends AbstractNodeAmPlugin {
 
     @Override
     public String getPluginVersion() {
-        return "2.0.3";
+        return "2.0.4";
     }
 
     @Override
@@ -63,9 +65,7 @@ public class PushRegNodePlugin extends AbstractNodeAmPlugin {
 
     @Override
     protected Iterable<? extends Class<? extends Node>> getNodes() {
-        return asList(
-                PushRegNode.class
-        );
+        return Collections.singletonList(PushRegNode.class);
     }
 
     @Override
